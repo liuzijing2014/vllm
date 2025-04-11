@@ -13,14 +13,14 @@ model_name=$(basename "$MODEL_DIR")
 
 base_command="with-proxy python $GIT_BASE/liuzijing2014/vllm/scripts/test_lm_eval.py"
 
-# Run mmlu_pro eval
-mmlu_pro_command="$base_command --tasks mmlu_pro 2>&1 | tee ${model_name}_mmlo_pro.log"
+# Run texst eval
+mmlu_pro_command="$base_command --tasks mmlu_pro 2>&1 | tee ${model_name}_text_eval.log"
 
 echo "$mmlu_pro_command"
 eval "$mmlu_pro_command"
 
-# Run chartqa eval
-chartqa_command="$base_command --backend vllm-vlm --tasks chartqa 2>&1 | tee ${model_name}_chartqa.log"
+# Run mm eval
+chartqa_command="$base_command --backend vllm-vlm --tasks chartqa 2>&1 | tee ${model_name}_mm_eval.log"
 
 echo "$chartqa_command"
 eval "$chartqa_command"
