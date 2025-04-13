@@ -155,6 +155,7 @@ def launch_lm_eval(args):
 
     # Print results like lm-eval script
     print(make_table(results))
+    print(f"----------from model {MODEL_PATH}----------------")
 
     # Save results for examination
     # TODO: would be nice if tracker returns the real path

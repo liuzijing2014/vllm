@@ -7,7 +7,7 @@ from compressed_tensors.quantization import (
     QuantizationStrategy,
     QuantizationType,
 )
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import GPTQModifier
 from transformers import AutoTokenizer, Llama4ForConditionalGeneration
@@ -81,26 +81,21 @@ tokenizer = AutoTokenizer.from_pretrained(LLAMA_DIR)
 # Select calibration dataset.
 DATASET_ID = "HuggingFaceH4/ultrachat_200k"
 DATASET_SPLIT = "train_sft"
-NUM_CALIBRATION_SAMPLES = 2048
+NUM_CALIBRATION_SAMPLES = 1024
 MAX_SEQUENCE_LENGTH = 2048
 
 # # Load dataset and preprocess.
 ds = load_dataset(DATASET_ID, split=DATASET_SPLIT)
 ds = ds.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
-
-
 def preprocess(example):
     return {
         "text": tokenizer.apply_chat_template(
             example["messages"],
             tokenize=False,
+            add_generation_prompt=True
         )
     }
-
-
 ds = ds.map(preprocess)
-
-
 # Tokenize inputs.
 def tokenize(sample):
     return tokenizer(
@@ -110,9 +105,20 @@ def tokenize(sample):
         truncation=True,
         add_special_tokens=False,
     )
-
-
 ds = ds.map(tokenize, remove_columns=ds.column_names)
+
+DATASET_ID2 = "TIGER-Lab/MMLU-Pro"
+DATASET_SPLIT2 = "test"
+ds2 = load_dataset(DATASET_ID2, split=DATASET_SPLIT2)
+ds2 = ds2.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
+def preprocess2(example):
+    return {
+        "text": example["question"].join(example["options"])
+    }
+ds2 = ds2.map(preprocess2)
+ds2 = ds2.map(tokenize, remove_columns=ds2.column_names)
+
+final_ds = concatenate_datasets([ds, ds2]).shuffle(seed=42)
 
 recipe = GPTQModifier(
     targets="Linear",
@@ -127,7 +133,7 @@ recipe = GPTQModifier(
                 symmetric=True,
                 dynamic=False,
                 actorder="weight",
-                observer="mse",
+                # observer="mse",
             ),
         ),
     },
@@ -138,15 +144,14 @@ recipe = GPTQModifier(
         "re:.*vision_model",
         "re:.*multi_modal_projector",
     ],
-    update_size=NUM_CALIBRATION_SAMPLES,
-    dampening_frac=0.1,
+    dampening_frac=0.05,
 )
 oneshot(
     model=model,
-    dataset=ds,
+    dataset=final_ds,
     recipe=recipe,
     max_seq_length=MAX_SEQUENCE_LENGTH,
-    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
+    num_calibration_samples=NUM_CALIBRATION_SAMPLES*2,
     save_compressed=True,
     trust_remote_code_model=True,
     output_dir=LLAMA_OUT_DIR,
