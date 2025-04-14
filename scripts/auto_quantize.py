@@ -167,9 +167,9 @@ def get_recipe(observer, dampening_frac):
 
 
 def quantize(args, model, tokenizer):
-    calibration_samples = [4096]
+    calibration_samples = [512,1024,2048,4096]
     max_seq_length = [2048,8196]
-    dampening_fracs = [0.02, 0.01]
+    dampening_fracs = [0.01]
     model_name = os.path.basename(args.base_model_path)
 
     def preprocess(example):
@@ -192,7 +192,8 @@ def quantize(args, model, tokenizer):
     idx = 0
     for num_calibration_samples in calibration_samples:
         for max_length in max_seq_length:
-            ds = ds.select(range(num_calibration_samples)).map(preprocess).map(tokenize, remove_columns=ds.column_names)
+            selected_ds = ds.select(range(num_calibration_samples))
+            selected_ds=selected_ds.map(preprocess).map(tokenize, remove_columns=ds.column_names)
             for dampening_frac in dampening_fracs:
                 recipe = get_recipe(args.observer, dampening_frac)
                 model_out_dir = os.path.join(
@@ -207,7 +208,7 @@ def quantize(args, model, tokenizer):
                 logging.critical(f"Output dir: {model_out_dir}")
                 oneshot(
                     model=model,
-                    dataset=ds,
+                    dataset=selected_ds,
                     recipe=recipe,
                     max_seq_length=max_length,
                     num_calibration_samples=num_calibration_samples,
