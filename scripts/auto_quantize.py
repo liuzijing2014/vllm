@@ -210,7 +210,7 @@ def quantize(args, model, tokenizer):
                 )
                 logging.critical(f"Loop{idx}: Quantize {model_name} with settings:")
                 logging.critical(
-                    f"\n    - {args.observer=}\n    - {num_calibration_samples=}\n  - {max_length=}\n   - {dampening_frac=}"
+                    f"\n    - {args.observer=}\n    - {num_calibration_samples=}\n  - {max_length=}\n   - {dampening_frac=}\n   - {args.seed=}"
                 )
                 logging.critical(f"Output dir: {model_out_dir}")
                 oneshot(
@@ -285,5 +285,3 @@ if __name__ == "__main__":
     )
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_path)
     quantize(args, model, tokenizer)
-    # sample_generate(model, tokenizer, "zijing")
-    # run_eval(args.base_model_path, "zijing")

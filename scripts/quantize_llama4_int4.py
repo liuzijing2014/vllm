@@ -7,7 +7,7 @@ from compressed_tensors.quantization import (
     QuantizationStrategy,
     QuantizationType,
 )
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import GPTQModifier
 from transformers import AutoTokenizer, Llama4ForConditionalGeneration
@@ -66,7 +66,7 @@ assert (
     LLAMA_OUT_DIR != ""
 ), "Please set the environment variable LLAMA_OUT_DIR to the path of the model output directory."
 
-print(f"zjl: Load model from {LLAMA_DIR} and save model to {LLAMA_OUT_DIR}")
+print(f"Load model from {LLAMA_DIR} and save model to {LLAMA_OUT_DIR}")
 
 
 model = Llama4ForConditionalGeneration.from_pretrained(
@@ -74,8 +74,6 @@ model = Llama4ForConditionalGeneration.from_pretrained(
     torch_dtype="auto",
     device_map="auto",
 )
-model.generation_config.top_p = 0.9
-model.generation_config.temperature = 0.6
 tokenizer = AutoTokenizer.from_pretrained(LLAMA_DIR)
 
 # Select calibration dataset.
@@ -87,15 +85,15 @@ MAX_SEQUENCE_LENGTH = 2048
 # # Load dataset and preprocess.
 ds = load_dataset(DATASET_ID, split=DATASET_SPLIT)
 ds = ds.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
+
+
 def preprocess(example):
-    return {
-        "text": tokenizer.apply_chat_template(
-            example["messages"],
-            tokenize=False,
-            add_generation_prompt=True
-        )
-    }
+    return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
+
+
 ds = ds.map(preprocess)
+
+
 # Tokenize inputs.
 def tokenize(sample):
     return tokenizer(
@@ -105,20 +103,9 @@ def tokenize(sample):
         truncation=True,
         add_special_tokens=False,
     )
+
+
 ds = ds.map(tokenize, remove_columns=ds.column_names)
-
-DATASET_ID2 = "TIGER-Lab/MMLU-Pro"
-DATASET_SPLIT2 = "test"
-ds2 = load_dataset(DATASET_ID2, split=DATASET_SPLIT2)
-ds2 = ds2.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
-def preprocess2(example):
-    return {
-        "text": example["question"].join(example["options"])
-    }
-ds2 = ds2.map(preprocess2)
-ds2 = ds2.map(tokenize, remove_columns=ds2.column_names)
-
-final_ds = concatenate_datasets([ds, ds2]).shuffle(seed=42)
 
 recipe = GPTQModifier(
     targets="Linear",
@@ -133,7 +120,7 @@ recipe = GPTQModifier(
                 symmetric=True,
                 dynamic=False,
                 actorder="weight",
-                # observer="mse",
+                observer="mse",
             ),
         ),
     },
@@ -148,10 +135,10 @@ recipe = GPTQModifier(
 )
 oneshot(
     model=model,
-    dataset=final_ds,
+    dataset=ds,
     recipe=recipe,
     max_seq_length=MAX_SEQUENCE_LENGTH,
-    num_calibration_samples=NUM_CALIBRATION_SAMPLES*2,
+    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
     save_compressed=True,
     trust_remote_code_model=True,
     output_dir=LLAMA_OUT_DIR,
