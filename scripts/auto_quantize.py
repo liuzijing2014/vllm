@@ -1,8 +1,6 @@
 import argparse
 import logging
 import os
-import random
-import string
 from functools import partial
 
 import lm_eval
@@ -12,12 +10,12 @@ from compressed_tensors.quantization import (
     QuantizationStrategy,
     QuantizationType,
 )
+from datasets import load_dataset
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import GPTQModifier
 from lm_eval.loggers import EvaluationTracker
 from lm_eval.utils import make_table, simple_parse_args_string
 from transformers import AutoTokenizer, Llama4ForConditionalGeneration
-from datasets import load_dataset
 
 logging.basicConfig(
     filename="auto_quantize.log",  # Log output file
@@ -25,10 +23,11 @@ logging.basicConfig(
     level=logging.CRITICAL,  # Log messages with level INFO and above
     format="%(asctime)s - %(message)s",  # Log message format
 )
-chars = string.ascii_letters + string.digits
+from datetime import datetime
+
 GPU_MEMORY_UTILIZATION = 0.9
 MAX_OUTPUT_LEN = 2048
-MAX_MODEL_LENGTH=32768
+MAX_MODEL_LENGTH = 32768
 
 
 def model_args_dict_to_str(model_args):
@@ -167,8 +166,8 @@ def get_recipe(observer, dampening_frac):
 
 
 def quantize(args, model, tokenizer):
-    calibration_samples = [512,1024,2048,4096]
-    max_seq_length = [2048,8196]
+    calibration_samples = [1024, 2048]
+    max_seq_length = [2048]
     dampening_fracs = [0.01]
     model_name = os.path.basename(args.base_model_path)
 
@@ -193,14 +192,22 @@ def quantize(args, model, tokenizer):
     for num_calibration_samples in calibration_samples:
         for max_length in max_seq_length:
             selected_ds = ds.select(range(num_calibration_samples))
-            selected_ds=selected_ds.map(preprocess).map(tokenize, remove_columns=ds.column_names)
+            selected_ds = selected_ds.map(preprocess).map(
+                tokenize, remove_columns=ds.column_names
+            )
             for dampening_frac in dampening_fracs:
                 recipe = get_recipe(args.observer, dampening_frac)
+                new_model_name = (
+                    f"{model_name}_{datetime.now().strftime("%Y-%m-%d-%H:%M")}"
+                )
                 model_out_dir = os.path.join(
-                    args.outpur_model_dir, f"{model_name}_{''.join(random.choices(chars, k=4))}"
+                    args.outpur_model_dir,
+                    new_model_name,
                 )
                 os.makedirs(model_out_dir, exist_ok=True)
-                logging.critical("====================================================================")
+                logging.critical(
+                    "===================================================================="
+                )
                 logging.critical(f"Loop{idx}: Quantize {model_name} with settings:")
                 logging.critical(
                     f"\n    - {args.observer=}\n    - {num_calibration_samples=}\n  - {max_length=}\n   - {dampening_frac=}"
@@ -217,9 +224,11 @@ def quantize(args, model, tokenizer):
                     output_dir=model_out_dir,
                 )
                 sample_generate(model, tokenizer, model_name)
-                run_eval(model_out_dir, model_name)
+                run_eval(model_out_dir, new_model_name)
                 idx += 1
-                logging.critical("====================================================================")
+                logging.critical(
+                    "===================================================================="
+                )
 
 
 if __name__ == "__main__":
