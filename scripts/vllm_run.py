@@ -23,7 +23,7 @@ def test():
     # Create an LLM.
     llm = LLM(
         model=LLAMA_OUT_DIR,
-        tensor_parallel_size=1,
+        tensor_parallel_size=8,
         max_model_len=4096,
         enforce_eager=True,
     )
