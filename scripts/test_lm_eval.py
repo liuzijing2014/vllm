@@ -40,10 +40,9 @@ from lm_eval.utils import make_table, simple_parse_args_string
 HOSTNAME = os.environ.get("HOSTNAME", "localhost")
 PORT = os.environ.get("PORT", "12345")
 # TODO: be smarter about this depends on 16E or 128E
-GPU_MEMORY_UTILIZATION = os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", "0.8")
-MODEL_PATH = os.environ.get(
-    "LLAMA_OUT_DIR", "meta-llama/Llama-4-Scout-17B-16E-Instruct"
-)
+GPU_MEMORY_UTILIZATION = os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", "0.9")
+MODEL_PATH = os.environ.get("LLAMA_OUT_DIR",
+                            "meta-llama/Llama-4-Scout-17B-16E-Instruct")
 MAX_OUTPUT_LEN = 2048
 
 
@@ -171,7 +170,8 @@ def launch_lm_eval(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument(
         "--model",
         "-m",
@@ -179,9 +179,10 @@ if __name__ == "__main__":
         default="llama4_17b",
         help="Model name specified on vLLM server",
     )
-    parser.add_argument(
-        "--quantization", "-q", type=str, help="online quantization schema"
-    )
+    parser.add_argument("--quantization",
+                        "-q",
+                        type=str,
+                        help="online quantization schema")
     parser.add_argument(
         "--backend",
         "-b",
