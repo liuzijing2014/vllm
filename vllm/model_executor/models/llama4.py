@@ -25,20 +25,31 @@ from transformers import Llama4TextConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
-from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
-                    is_pp_missing_parameter)
+from .utils import (
+    AutoWeightsLoader,
+    extract_layer_index,
+    fast_topk,
+    is_pp_missing_parameter,
+)
+
+DUMP_DIR = "/data/users/zijingliu/logs/tensor_dumps/ref"
 
 
 class Llama4MoE(nn.Module):
@@ -51,24 +62,27 @@ class Llama4MoE(nn.Module):
         renormalize: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
-        router_scores = torch.sigmoid(router_scores.float()).to(
-            hidden_states.dtype)
+        router_scores = torch.sigmoid(router_scores.float()).to(hidden_states.dtype)
         return (router_scores, router_indices.to(torch.int32))
 
-    def __init__(self,
-                 config: Llama4TextConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        config: Llama4TextConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = config.num_experts_per_tok
 
         intermediate_size_moe = config.intermediate_size
-        self.router = ReplicatedLinear(config.hidden_size,
-                                       config.num_local_experts,
-                                       bias=False,
-                                       quant_config=None,
-                                       prefix=f"{prefix}.router")
+        self.router = ReplicatedLinear(
+            config.hidden_size,
+            config.num_local_experts,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.router",
+        )
 
         self.experts = FusedMoE(
             num_experts=config.num_local_experts,
@@ -80,7 +94,8 @@ class Llama4MoE(nn.Module):
             reduce_results=False,
             renormalize=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.experts")
+            prefix=f"{prefix}.experts",
+        )
 
         self.shared_expert = LlamaMLP(
             hidden_size=config.hidden_size,
@@ -92,36 +107,71 @@ class Llama4MoE(nn.Module):
             reduce_results=False,  # We need to do scatter before reduce
         )
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, dump=False, layer_idx=0, log=False):
+        tp_size = get_tensor_model_parallel_world_size()
+        rank = get_tensor_model_parallel_rank()
+        if dump:
+            torch.save(
+                hidden_states,
+                f"{DUMP_DIR}/moe/moe_hidden_states_tp_{tp_size}_r{rank}_l{layer_idx}.pt",
+            )
         router_logits, _ = self.router(hidden_states)
+        if dump:
+            torch.save(
+                router_logits,
+                f"{DUMP_DIR}/moe/moe_router_logits_tp_{tp_size}_r{rank}_l{layer_idx}.pt",
+            )
         shared_out = self.shared_expert(hidden_states)
+        if dump:
+            torch.save(
+                shared_out,
+                f"{DUMP_DIR}/moe/moe_shared_out_tp_{tp_size}_r{rank}_l{layer_idx}.pt",
+            )
+        if log:
+            print(f"{self.experts.extra_repr()}")
+
         routed_out = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
+            dump=dump,
+            log=log,
         )
+        if dump:
+            torch.save(
+                routed_out,
+                f"{DUMP_DIR}/moe/moe_routed_out_tp_{tp_size}_r{rank}_l{layer_idx}.pt",
+            )
         experts_out = routed_out + shared_out
 
         if self.tp_size > 1:
             experts_out = tensor_model_parallel_all_reduce(experts_out)
+
+        if dump:
+            torch.save(
+                experts_out,
+                f"{DUMP_DIR}/moe/moe_experts_out_tp_{tp_size}_r{rank}_l{layer_idx}.pt",
+            )
 
         return experts_out
 
 
 class Llama4Attention(nn.Module):
 
-    def __init__(self,
-                 config: Llama4TextConfig,
-                 hidden_size: int,
-                 num_heads: int,
-                 num_kv_heads: int,
-                 rope_theta: float = 10000,
-                 rope_scaling: Optional[Dict[str, Any]] = None,
-                 max_position_embeddings: int = 8192,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 bias: bool = False,
-                 bias_o_proj: bool = False,
-                 cache_config: Optional[CacheConfig] = None,
-                 prefix: str = "") -> None:
+    def __init__(
+        self,
+        config: Llama4TextConfig,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        quant_config: Optional[QuantizationConfig] = None,
+        bias: bool = False,
+        bias_o_proj: bool = False,
+        cache_config: Optional[CacheConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
@@ -147,20 +197,23 @@ class Llama4Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         # TODO: attn_temperature_tuning should be a bool in huggingface
-        self.attn_temperature_tuning = self.nope and \
-            config.attn_temperature_tuning > 0
+        self.attn_temperature_tuning = self.nope and config.attn_temperature_tuning > 0
 
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.n_rep = self.num_heads // self.num_kv_heads
-        self.qk_norm = RMSNorm(
-            hidden_size=self.head_dim,
-            eps=config.rms_norm_eps,
-            has_weight=False,
-            dtype=torch.float32,
-        ) if self.use_qk_norm else None
+        self.qk_norm = (
+            RMSNorm(
+                hidden_size=self.head_dim,
+                eps=config.rms_norm_eps,
+                has_weight=False,
+                dtype=torch.float32,
+            )
+            if self.use_qk_norm
+            else None
+        )
         self.qkv_proj = QKVParallelLinear(
             hidden_size=hidden_size,
             head_size=self.head_dim,
@@ -183,14 +236,18 @@ class Llama4Attention(nn.Module):
         if is_gguf and config.model_type == "llama":
             is_neox_style = False
 
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=max_position_embeddings,
-            base=int(rope_theta),
-            rope_scaling=rope_scaling if rope_scaling != "default" else None,
-            is_neox_style=is_neox_style,
-        ) if not self.nope else None
+        self.rotary_emb = (
+            get_rope(
+                self.head_dim,
+                rotary_dim=self.head_dim,
+                max_position=max_position_embeddings,
+                base=int(rope_theta),
+                rope_scaling=rope_scaling if rope_scaling != "default" else None,
+                is_neox_style=is_neox_style,
+            )
+            if not self.nope
+            else None
+        )
 
         self.attn = Attention(
             self.num_heads,
@@ -273,8 +330,7 @@ class Llama4DecoderLayer(nn.Module):
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
         )
-        is_moe_layer = (self.layer_idx +
-                        1) % config.interleave_moe_layer_step == 0
+        is_moe_layer = (self.layer_idx + 1) % config.interleave_moe_layer_step == 0
         if is_moe_layer:
             self.feed_forward = Llama4MoE(
                 config=config,
@@ -290,10 +346,10 @@ class Llama4DecoderLayer(nn.Module):
                 bias=False,
                 prefix=f"{prefix}.feed_forward",
             )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -302,34 +358,75 @@ class Llama4DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
+        dump = False
+        log = False
+        tp_size = get_tensor_model_parallel_world_size()
+        rank = get_tensor_model_parallel_rank()
+        if self.layer_idx in [0] and (len(positions) == 12):
+            print(f"rank: {rank}, tp_size: {tp_size}, poisitions: {positions}")
+            log = True
+            # pass
+            dump = True
+
+        if dump:
+            torch.save(
+                positions,
+                f"{DUMP_DIR}/positions_tp_{tp_size}_r{rank}_l{self.layer_idx}.pt",
+            )
+
+        if dump:
+            torch.save(
+                hidden_states,
+                f"{DUMP_DIR}/input_hidden_states_tp_{tp_size}_r{rank}_l{self.layer_idx}.pt",
+            )
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        if dump:
+            torch.save(
+                hidden_states,
+                f"{DUMP_DIR}/input_layernorm_tp_{tp_size}_r{rank}_l{self.layer_idx}.pt",
+            )
+
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+
+        if dump:
+            torch.save(
+                hidden_states,
+                f"{DUMP_DIR}/attn_output_tp_{tp_size}_{rank}_l{self.layer_idx}.pt",
+            )
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
-        hidden_states = self.feed_forward(hidden_states)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        if dump:
+            torch.save(
+                hidden_states,
+                f"{DUMP_DIR}/post_attn_layernorm_tp_{tp_size}_{rank}_l{self.layer_idx}.pt",
+            )
+        hidden_states = self.feed_forward(hidden_states, dump, self.layer_idx, log)
+        if dump:
+            torch.save(
+                hidden_states,
+                f"{DUMP_DIR}/moe_tp_{tp_size}_{rank}_l{self.layer_idx}.pt",
+            )
         return hidden_states, residual
 
 
 @support_torch_compile
 class Llama4Model(LlamaModel):
 
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 layer_type: type[Llama4DecoderLayer] = Llama4DecoderLayer):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        layer_type: type[Llama4DecoderLayer] = Llama4DecoderLayer,
+    ):
         self.num_experts = vllm_config.model_config.hf_config.num_local_experts
-        super().__init__(vllm_config=vllm_config,
-                         prefix=prefix,
-                         layer_type=layer_type)
+        super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
 
     def load_moe_expert_weights(
         self,
@@ -343,11 +440,10 @@ class Llama4Model(LlamaModel):
         expert_param_loaded = False
         if "experts.gate_up_proj" in name:
             loaded_weight = loaded_weight.chunk(2, dim=-1)
-        for (param_name, weight_name, expert_id,
-             shard_id) in expert_params_mapping:
+        for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
             new_loaded_weight = loaded_weight
             if fused:
-                e_str, _, proj_str, _ = weight_name.split('.')
+                e_str, _, proj_str, _ = weight_name.split(".")
                 weight_name = f"{e_str}.{proj_str}"
                 param_name = f"{param_name}weight"
             if weight_name not in name:
@@ -356,8 +452,9 @@ class Llama4Model(LlamaModel):
             # Skip layers on other devices.
             if is_pp_missing_parameter(name, self):
                 continue
-            if ((name.endswith(".bias") or name.endswith("_bias"))
-                    and name not in params_dict):
+            if (
+                name.endswith(".bias") or name.endswith("_bias")
+            ) and name not in params_dict:
                 continue
             param = params_dict[full_param_name]
             weight_loader = param.weight_loader
@@ -368,30 +465,32 @@ class Llama4Model(LlamaModel):
                 new_loaded_weight = new_loaded_weight.transpose(-1, -2)
                 layer_idx = extract_layer_index(name)
                 # EP mapping
-                expert_map = self.layers[
-                    layer_idx].feed_forward.experts.expert_map
+                expert_map = self.layers[layer_idx].feed_forward.experts.expert_map
                 if expert_map is not None:
-                    local_expert_indices = (expert_map != -1) \
-                                            .nonzero() \
-                                            .flatten() \
-                                            .to(new_loaded_weight.device)
+                    local_expert_indices = (
+                        (expert_map != -1)
+                        .nonzero()
+                        .flatten()
+                        .to(new_loaded_weight.device)
+                    )
                     new_loaded_weight = new_loaded_weight[local_expert_indices]
                     expert_id = local_expert_indices[0].item()
             else:
                 # TODO: add EP support for non fused weights
                 pass
-            weight_loader(param,
-                          new_loaded_weight,
-                          full_param_name,
-                          shard_id=shard_id,
-                          expert_id=expert_id)
+            weight_loader(
+                param,
+                new_loaded_weight,
+                full_param_name,
+                shard_id=shard_id,
+                expert_id=expert_id,
+            )
 
             loaded_params.add(full_param_name)
             expert_param_loaded = True
         return expert_param_loaded
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -405,26 +504,29 @@ class Llama4Model(LlamaModel):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.num_experts)
+            num_experts=self.num_experts,
+        )
         expert_params_mapping_fused = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_up_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="gate_up_proj",
-            num_experts=1)
+            num_experts=1,
+        )
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "experts.gate_up_proj" in name or "experts.down_proj" in name:
                 fused_experts_params = True
                 expert_params_mapping = expert_params_mapping_fused
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(name)
+            ):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -446,14 +548,16 @@ class Llama4Model(LlamaModel):
                     params_dict,
                     loaded_params,
                     expert_params_mapping,
-                    fused=fused_experts_params)
+                    fused=fused_experts_params,
+                )
 
                 if not moe_loaded:
                     if is_pp_missing_parameter(name, self):
                         continue
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
         return loaded_params
@@ -471,30 +575,29 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         gen_config = vllm_config.model_config.try_get_generation_config()
         gen_config.update(vllm_config.model_config.override_generation_config)
         # enable temperature tuning by default when max_model_len > 32K
-        default_attn_temperature_tuning = \
-            vllm_config.model_config.max_model_len > 32768
-        vllm_config.model_config.hf_config.attn_temperature_tuning \
-            = gen_config.get(
-                "attn_temperature_tuning", default_attn_temperature_tuning)
+        default_attn_temperature_tuning = vllm_config.model_config.max_model_len > 32768
+        vllm_config.model_config.hf_config.attn_temperature_tuning = gen_config.get(
+            "attn_temperature_tuning", default_attn_temperature_tuning
+        )
 
-        super().__init__(vllm_config=vllm_config,
-                         prefix=prefix,
-                         layer_type=Llama4DecoderLayer)
+        super().__init__(
+            vllm_config=vllm_config, prefix=prefix, layer_type=Llama4DecoderLayer
+        )
 
-    def _init_model(self,
-                    vllm_config: VllmConfig,
-                    prefix: str = "",
-                    layer_type: type[Llama4DecoderLayer] = Llama4DecoderLayer):
-        return Llama4Model(vllm_config=vllm_config,
-                           prefix=prefix,
-                           layer_type=layer_type)
+    def _init_model(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        layer_type: type[Llama4DecoderLayer] = Llama4DecoderLayer,
+    ):
+        return Llama4Model(
+            vllm_config=vllm_config, prefix=prefix, layer_type=layer_type
+        )
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         weights = [
             self.permute_qk_weight_for_rotary(name, loaded_weight)
@@ -512,19 +615,18 @@ class Llama4ForCausalLM(LlamaForCausalLM):
             attn_in = self.config.head_dim * n_heads
             attn_out = self.config.hidden_size
 
-            return w.view(n_heads, attn_in // n_heads // 2, 2,
-                          attn_out).transpose(1, 2).reshape(attn_in, attn_out)
+            return (
+                w.view(n_heads, attn_in // n_heads // 2, 2, attn_out)
+                .transpose(1, 2)
+                .reshape(attn_in, attn_out)
+            )
 
         modules = name.split(".")
 
         # rotary embeds should be sliced
-        if ("wk" in modules or "k_proj" in modules) \
-           and modules[-1] == "weight":
-            loaded_weight = permute(loaded_weight,
-                                    self.config.num_key_value_heads)
-        elif ("wq" in modules or "q_proj" in modules) \
-                and modules[-1] == "weight":
-            loaded_weight = permute(loaded_weight,
-                                    self.config.num_attention_heads)
+        if ("wk" in modules or "k_proj" in modules) and modules[-1] == "weight":
+            loaded_weight = permute(loaded_weight, self.config.num_key_value_heads)
+        elif ("wq" in modules or "q_proj" in modules) and modules[-1] == "weight":
+            loaded_weight = permute(loaded_weight, self.config.num_attention_heads)
 
         return name, loaded_weight
