@@ -366,7 +366,7 @@ class Llama4DecoderLayer(nn.Module):
             print(f"rank: {rank}, tp_size: {tp_size}, poisitions: {positions}")
             log = True
             # pass
-            dump = True
+            # dump = True
 
         if dump:
             torch.save(

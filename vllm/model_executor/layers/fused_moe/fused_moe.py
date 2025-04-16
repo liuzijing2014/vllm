@@ -1613,6 +1613,8 @@ def fused_experts_impl(
         if log:
             print(f"{qa1_scale=}")
 
+        qcurr_hidden_states = qcurr_hidden_states * curr_topk_weights
+
         invoke_fused_moe_kernel(
             qcurr_hidden_states,
             w1,
@@ -1624,7 +1626,7 @@ def fused_experts_impl(
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
-            apply_router_weight_on_input,
+            False,  # apply_router_weight_on_input,
             top_k_num,
             config,
             compute_type=compute_type,
@@ -1692,7 +1694,7 @@ def fused_experts_impl(
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
-            not apply_router_weight_on_input,
+            False,  # not apply_router_weight_on_input,
             1,
             config,
             compute_type=compute_type,
