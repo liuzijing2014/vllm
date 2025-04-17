@@ -9,9 +9,10 @@ export no_proxy=".fbcdn.net,.facebook.com,.thefacebook.com,.tfbnw.net,.fb.com,.f
 
 GIT_BASE=${GIT_BASE:-/data/users/$USER/gitrepos}
 MODEL_DIR=${LLAMA_OUT_DIR:-"meta-llama/Llama-4-Scout-17B-16E-Instruct"}
+TP=${TP:-"8"}
 model_name=$(basename "$MODEL_DIR")
 
-base_command="python $GIT_BASE/liuzijing2014/vllm/scripts/test_lm_eval.py"
+base_command="python $GIT_BASE/liuzijing2014/vllm/scripts/test_lm_eval.py -tp ${TP}"
 
 # Run texst eval
 mmlu_pro_command="$base_command --tasks mmlu_pro 2>&1 | tee ${model_name}_text_eval_$(date +%Y%m%d_%H%M).log"

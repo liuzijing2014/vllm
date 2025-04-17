@@ -85,7 +85,7 @@ def vllm_args_dict(args):
     args_dict = {
         "pretrained": MODEL_PATH,
         "max_length": args.max_seq_len,
-        "tensor_parallel_size": 8,
+        "tensor_parallel_size": args.tensor_parallel_size,
         "dtype": "auto",
         "gpu_memory_utilization": GPU_MEMORY_UTILIZATION,
         "max_gen_toks": MAX_OUTPUT_LEN,
@@ -234,6 +234,12 @@ if __name__ == "__main__":
         default=[4096, 8192, 16384, 32768, 65536, 128000],
         type=int,
         help="sequence lengths for long context eval dataset",
+    )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        "-tp",
+        default=8,
+        type=int,
     )
 
     args = parser.parse_args()
