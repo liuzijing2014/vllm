@@ -79,7 +79,7 @@ tokenizer = AutoTokenizer.from_pretrained(LLAMA_DIR)
 # Select calibration dataset.
 DATASET_ID = "HuggingFaceH4/ultrachat_200k"
 DATASET_SPLIT = "train_sft"
-NUM_CALIBRATION_SAMPLES = 1024
+NUM_CALIBRATION_SAMPLES = 2048
 MAX_SEQUENCE_LENGTH = 2048
 
 # # Load dataset and preprocess.
@@ -120,7 +120,7 @@ recipe = GPTQModifier(
                 symmetric=True,
                 dynamic=False,
                 actorder="weight",
-                observer="mse",
+                observer="minmax",
             ),
         ),
     },
@@ -131,7 +131,7 @@ recipe = GPTQModifier(
         "re:.*vision_model",
         "re:.*multi_modal_projector",
     ],
-    dampening_frac=0.05,
+    dampening_frac=0.01,
 )
 oneshot(
     model=model,
