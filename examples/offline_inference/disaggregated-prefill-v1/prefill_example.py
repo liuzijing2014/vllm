@@ -1,22 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import os
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
-context = "Hi " * 1000
-context2 = "Hey " * 500
+GPU_MEMORY_UTILIZATION = os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", 0.9)
+LLAMA_DIR = os.environ.get("LLAMA_DIR", "meta-llama/Llama-4-Scout-17B-16E-Instruct")
+MAX_MODEL_LENGTH = os.environ.get("MAX_MODEL_LENGTH", 8192)
+
+# context = "Hi " * 1000
+# context2 = "Hey " * 500
+# prompts = [
+#     context + "Hello, my name is",
+#     context + "The capital of France is",
+#     context2 + "Your name is",
+#     context2 + "The capital of China is",
+# ]
 prompts = [
-    context + "Hello, my name is",
-    context + "The capital of France is",
-    context2 + "Your name is",
-    context2 + "The capital of China is",
+    "The capital of France is",
+    "The color of the sky is blue but sometimes it can also be",
 ]
 
 sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
-llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct",
+llm = LLM(model=LLAMA_DIR,
           enforce_eager=True,
-          gpu_memory_utilization=0.8,
+          tensor_parallel_size=4,
+          gpu_memory_utilization=float(GPU_MEMORY_UTILIZATION),
+          max_model_len=MAX_MODEL_LENGTH,
           kv_transfer_config=KVTransferConfig.from_cli(
               '{"kv_connector":"SharedStorageConnector","kv_role":"kv_both", '
               '"kv_connector_extra_config": '
