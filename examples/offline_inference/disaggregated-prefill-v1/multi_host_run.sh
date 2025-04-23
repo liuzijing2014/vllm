@@ -2,6 +2,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DECODER_HOST=${DECODER_HOST:-"localhost"}
+PREFILL_HOST=${PREFILL_HOST:-"localhost"}
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <prefiller | decoder | proxy> [model]"
@@ -26,7 +27,7 @@ if [[ $1 == "prefiller" ]]; then
         LMCACHE_USE_EXPERIMENTAL=True \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+        CUDA_VISIBLE_DEVICES=0 \
         vllm serve $MODEL \
         --port 8100 \
         --disable-log-requests \
@@ -47,7 +48,7 @@ elif [[ $1 == "decoder" ]]; then
         LMCACHE_USE_EXPERIMENTAL=True \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+        CUDA_VISIBLE_DEVICES=1 \
         vllm serve $MODEL \
         --port 8200 \
         --disable-log-requests \
@@ -64,9 +65,9 @@ elif [[ $1 == "proxy" ]]; then
     python3 $SCRIPT_DIR/disagg_proxy_server.py \
         --host localhost \
         --port 9000 \
-        --prefiller-host localhost \
+        --prefiller-host $PREFILL_HOST \
         --prefiller-port 8100 \
-        --decoder-host localhost \
+        --decoder-host $DECODER_HOST \
         --decoder-port 8200
 
 else
