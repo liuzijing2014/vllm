@@ -39,7 +39,7 @@ else:
     fused_moe_pallas = None  # type: ignore
 logger = init_logger(__name__)
 
-DUMP_DIR = "/data/users/zijingliu/logs/tensor_dumps/ref"
+DUMP_DIR = "/data/users/zijingliu/logs/tensor_dumps"
 
 
 class FusedMoeWeightScaleSupported(Enum):

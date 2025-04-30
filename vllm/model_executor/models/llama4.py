@@ -49,7 +49,7 @@ from .utils import (
     is_pp_missing_parameter,
 )
 
-DUMP_DIR = "/data/users/zijingliu/logs/tensor_dumps/ref"
+DUMP_DIR = "/data/users/zijingliu/logs/tensor_dumps"
 
 
 class Llama4MoE(nn.Module):
@@ -271,8 +271,12 @@ class Llama4Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        dump: bool = False,
+        log: bool = False,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        if log:
+            print(f"{self.qkv_proj.weight.shape=}, {qkv.shape=}")
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         if self.rotary_emb is not None:
@@ -282,6 +286,9 @@ class Llama4Attention(nn.Module):
             q = self.qk_norm(q.float()).reshape(-1, self.q_size).to(q.dtype)
             k = k.reshape(-1, self.num_kv_heads, self.head_dim)
             k = self.qk_norm(k.float()).reshape(-1, self.kv_size).to(k.dtype)
+
+        if log:
+            print(f"{q.shape=}, {k.shape=}, {v.shape=}")
 
         # We are applying temperature tuning (https://arxiv.org/abs/2501.19399)
         # to NoPE layers, where the inference-time temperature tuning function
@@ -295,7 +302,13 @@ class Llama4Attention(nn.Module):
             attn_scale = self._get_attn_scale(positions)
             q = (q * attn_scale).to(q.dtype)
         attn_output = self.attn(q, k, v)
+        if log:
+            print(f"{attn_output.shape=}")
+            for kv_cache in self.attn.kv_cache:
+                print(f"{kv_cache.shape=}")
         output, _ = self.o_proj(attn_output)
+        if log:
+            print(f"{output.shape=}")
         return output
 
 
@@ -362,11 +375,11 @@ class Llama4DecoderLayer(nn.Module):
         log = False
         tp_size = get_tensor_model_parallel_world_size()
         rank = get_tensor_model_parallel_rank()
-        if self.layer_idx in [0] and (len(positions) == 12):
+        if self.layer_idx in [0] and (len(positions) > 1 and len(positions) < 12):
             print(f"rank: {rank}, tp_size: {tp_size}, poisitions: {positions}")
             log = True
-            # pass
             # dump = True
+            # pass
 
         if dump:
             torch.save(
@@ -391,7 +404,7 @@ class Llama4DecoderLayer(nn.Module):
                 f"{DUMP_DIR}/input_layernorm_tp_{tp_size}_r{rank}_l{self.layer_idx}.pt",
             )
 
-        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states, log=log, dump=dump)
 
         if dump:
             torch.save(

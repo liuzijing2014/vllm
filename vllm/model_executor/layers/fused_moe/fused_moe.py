@@ -37,7 +37,7 @@ from .rocm_aiter_fused_moe import (
 
 logger = init_logger(__name__)
 
-DUMP_DIR = "/data/users/zijingliu/logs/tensor_dumps/ref"
+DUMP_DIR = "/data/users/zijingliu/logs/tensor_dumps"
 
 
 @triton.jit
@@ -1557,7 +1557,7 @@ def fused_experts_impl(
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
-        if dump or log:
+        if dump:
             torch.save(
                 curr_hidden_states,
                 f"{DUMP_DIR}/moe/fused_moe_curr_hidden_states_tp_{tp_size}_r{rank}_c{chunk}.pt",
@@ -1584,7 +1584,7 @@ def fused_experts_impl(
             block_shape=block_shape,
         )
 
-        if dump or log:
+        if dump:
             torch.save(
                 qcurr_hidden_states,
                 f"{DUMP_DIR}/moe/fused_moe_1_qcurr_hidden_states_tp_{tp_size}_r{rank}_c{chunk}.pt",
@@ -1596,7 +1596,7 @@ def fused_experts_impl(
             curr_topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
         )
 
-        if dump or log:
+        if dump:
             torch.save(
                 sorted_token_ids,
                 f"{DUMP_DIR}/moe/fused_moe_sorted_token_ids_tp_{tp_size}_r{rank}_c{chunk}.pt",
@@ -1640,7 +1640,7 @@ def fused_experts_impl(
             dump=dump,
         )
 
-        if dump or log:
+        if dump:
             torch.save(
                 intermediate_cache1,
                 f"{DUMP_DIR}/moe/fused_moe_intermediate_cache1_tp_{tp_size}_r{rank}_c{chunk}.pt",
