@@ -1705,10 +1705,22 @@ def test_kv_connector_stats_failure_grouping():
     assert reduced["Num KV expired reqs"] == 1
 
 
+def test_kv_connector_stats_unrecognized_req():
+    """A notification for an unrecognized request alone keeps the stats
+    non-empty, so it gets exported, but it is not a transport failure."""
+    stats = NixlKVConnectorStats()
+    stats.record_unrecognized_req()
+    assert not stats.is_empty()
+
+    reduced = stats.reduce()
+    assert reduced["Num failed transfers"] == 0
+    assert reduced["Num KV expired reqs"] == 0
+
+
 def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
     """vllm:nixl_num_failed_transfers counts handshake and notification
-    failures too, while vllm:nixl_num_kv_expired_reqs stays a separate
-    counter."""
+    failures too, while vllm:nixl_num_kv_expired_reqs and
+    vllm:nixl_num_unrecognized_reqs stay separate counters."""
     from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
@@ -1747,6 +1759,7 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
     stats.record_failed_handshake()
     stats.record_failed_notification()
     stats.record_kv_expired_req()
+    stats.record_unrecognized_req()
     prom.observe(stats.data, engine_idx=0)
 
     def counter_value(name: str) -> float:
@@ -1758,6 +1771,36 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
 
     assert counter_value("vllm:nixl_num_failed_transfers_total") == 3.0
     assert counter_value("vllm:nixl_num_kv_expired_reqs_total") == 1.0
+    assert counter_value("vllm:nixl_num_unrecognized_reqs_total") == 1.0
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_unrecognized_notification_is_counted(default_vllm_config, dist_init):
+    """A completion notification for a request the prefiller no longer tracks
+    is counted once; notifications for tracked requests are not."""
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+    worker._reqs_to_process.add("known")
+    worker._reqs_to_send["known"] = time.perf_counter() + 10
+    worker.nixl_wrapper.get_new_notifs = MagicMock(
+        return_value={"decode-agent": [b"known:1", b"unknown:1"]}
+    )
+
+    assert worker._get_new_notifs() == {"known"}
+
+    stats = connector.get_kv_connector_stats()
+    assert isinstance(stats, NixlKVConnectorStats)
+    assert stats.data["num_unrecognized_reqs"] == [1]
+    assert connector.get_kv_connector_stats() is None
 
 
 def test_multi_kv_connector_stats_aggregation():

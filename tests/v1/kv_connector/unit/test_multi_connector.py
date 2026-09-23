@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm import LLM, SamplingParams
@@ -31,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiKVConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
+    NixlConnector,
     NixlKVConnectorStats,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -569,6 +571,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_unrecognized_reqs": [],
             }
         }
 
@@ -594,6 +597,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_unrecognized_reqs": [],
             },
             "MockConnector": {"mock_field": [1, 2, 3]},
         }
@@ -625,6 +629,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_unrecognized_reqs": [],
             },
         }
 
@@ -646,6 +651,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_unrecognized_reqs": [],
             }
         )
         mock_stats = MockConnectorStats(data={"mock_field": [1, 2, 3]})
@@ -677,6 +683,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_unrecognized_reqs": [],
             }
         )
 
@@ -710,6 +717,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_unrecognized_reqs": [],
             },
             "ExampleConnector": {"some_field": [1, 2, 3]},
         }
@@ -735,6 +743,53 @@ class TestMultiConnectorStats:
 
         child_metrics.observe.assert_called_once_with({"transfer_duration": [1.5]}, 2)
 
+    def test_prom_metrics_export_nixl_child_counters(self):
+        """Counters recorded by a NixlConnector child are exported through
+        the MultiConnector Prometheus metrics."""
+        registry = CollectorRegistry()
+
+        class RegistryGauge(Gauge):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, registry=registry, **kwargs)
+
+        class RegistryCounter(Counter):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, registry=registry, **kwargs)
+
+        class RegistryHistogram(Histogram):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, registry=registry, **kwargs)
+
+        vllm_config = create_vllm_config(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [{"kv_connector": "NixlConnector", "kv_role": "kv_both"}]
+            },
+        )
+        prom = MultiConnector.build_prom_metrics(
+            vllm_config,
+            {
+                Gauge: RegistryGauge,
+                Counter: RegistryCounter,
+                Histogram: RegistryHistogram,
+            },
+            labelnames=["engine"],
+            per_engine_labelvalues={0: ["0"]},
+        )
+        nixl_stats = NixlKVConnectorStats()
+        nixl_stats.record_unrecognized_req()
+        # Keyed by child class name, as in MultiConnector.get_kv_connector_stats.
+        stats = MultiKVConnectorStats(data={NixlConnector.__name__: nixl_stats})
+
+        prom.observe(stats.to_dict(), engine_idx=0)
+
+        def sample(name: str) -> float | None:
+            return registry.get_sample_value(name, {"engine": "0"})
+
+        assert sample("vllm:nixl_num_unrecognized_reqs_total") == 1.0
+        assert sample("vllm:nixl_num_failed_transfers_total") == 0.0
+
     def test_aggregate_same_connector(self):
         """Test aggregating stats from the same connector type."""
         stats1 = MultiKVConnectorStats(
@@ -749,6 +804,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_unrecognized_reqs": [],
                     }
                 )
             }
@@ -766,6 +822,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_unrecognized_reqs": [],
                     }
                 )
             }
@@ -799,6 +856,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_unrecognized_reqs": [],
                     }
                 )
             }
@@ -827,6 +885,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_unrecognized_reqs": [],
                     }
                 )
             }
@@ -855,6 +914,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_unrecognized_reqs": [],
                     }
                 )
             }
@@ -886,6 +946,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_unrecognized_reqs": [],
                     }
                 )
             }
