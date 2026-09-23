@@ -41,6 +41,11 @@ logger = init_logger(__name__)
 WAITING_REASON_CAPACITY = "capacity"
 WAITING_REASON_DEFERRED = "deferred"
 
+# Async KV load (KV fetch) stage labels
+KV_FETCH_STAGE_WAITING_TO_START = "waiting_to_start"
+KV_FETCH_STAGE_IN_PROGRESS = "in_progress"
+KV_FETCH_STAGE_COMPLETED_WAITING = "completed_waiting"
+
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
 StatLoggerFactory = AggregateStatLoggerFactory | PerEngineStatLoggerFactory
@@ -292,6 +297,17 @@ class LoggingStatLogger(StatLoggerBase):
             log_parts.append("Deferred: %d reqs")
             log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
 
+        kv_fetch_stages = [
+            self.last_scheduler_stats.num_kv_fetch_waiting_to_start,
+            self.last_scheduler_stats.num_kv_fetch_in_progress,
+            self.last_scheduler_stats.num_kv_fetch_completed_waiting,
+        ]
+        if any(kv_fetch_stages):
+            log_parts.append(
+                "KV fetch: %d waiting to start, %d in progress, %d completed waiting"
+            )
+            log_args.extend(kv_fetch_stages)
+
         if self.num_preemptions > 0:
             log_parts.append("Preemptions: %d")
             log_args.append(self.num_preemptions)
@@ -392,6 +408,15 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             )
             self.last_scheduler_stats.num_skipped_waiting_reqs += (
                 last_scheduler_stats.num_skipped_waiting_reqs
+            )
+            self.last_scheduler_stats.num_kv_fetch_waiting_to_start += (
+                last_scheduler_stats.num_kv_fetch_waiting_to_start
+            )
+            self.last_scheduler_stats.num_kv_fetch_in_progress += (
+                last_scheduler_stats.num_kv_fetch_in_progress
+            )
+            self.last_scheduler_stats.num_kv_fetch_completed_waiting += (
+                last_scheduler_stats.num_kv_fetch_completed_waiting
             )
             self.last_scheduler_stats.kv_cache_usage += (
                 last_scheduler_stats.kv_cache_usage
@@ -546,6 +571,35 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_waiting_by_reason[waiting_reason] = create_metric_per_engine(
                 gauge_waiting_by_reason, per_engine_labelvalues_with_reason
             )
+
+        # Async KV loads are only possible with a KV connector.
+        self.gauge_kv_fetch_by_stage: dict[str, dict[int, Gauge]] = {}
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config and kv_transfer_config.kv_connector:
+            gauge_kv_fetch_by_stage = self._gauge_cls(
+                name="vllm:num_requests_kv_fetch_by_stage",
+                documentation=(
+                    "Number of waiting requests by async KV load stage. "
+                    "Stage labels: 'waiting_to_start' = needs an async KV load "
+                    "that has not started; 'in_progress' = load started and not "
+                    "yet reported finished; 'completed_waiting' = load finished, "
+                    "request not running yet."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames + ["stage"],
+            )
+            for stage in [
+                KV_FETCH_STAGE_WAITING_TO_START,
+                KV_FETCH_STAGE_IN_PROGRESS,
+                KV_FETCH_STAGE_COMPLETED_WAITING,
+            ]:
+                per_engine_labelvalues_with_stage = {
+                    idx: labelvalues + [stage]
+                    for idx, labelvalues in per_engine_labelvalues.items()
+                }
+                self.gauge_kv_fetch_by_stage[stage] = create_metric_per_engine(
+                    gauge_kv_fetch_by_stage, per_engine_labelvalues_with_stage
+                )
 
         gauge_engine_sleep_state = self._gauge_cls(
             name="vllm:engine_sleep_state",
@@ -1047,6 +1101,22 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_waiting_by_reason[WAITING_REASON_DEFERRED][engine_idx].set(
                 scheduler_stats.num_skipped_waiting_reqs
             )
+            if self.gauge_kv_fetch_by_stage:
+                for stage, num_reqs in [
+                    (
+                        KV_FETCH_STAGE_WAITING_TO_START,
+                        scheduler_stats.num_kv_fetch_waiting_to_start,
+                    ),
+                    (
+                        KV_FETCH_STAGE_IN_PROGRESS,
+                        scheduler_stats.num_kv_fetch_in_progress,
+                    ),
+                    (
+                        KV_FETCH_STAGE_COMPLETED_WAITING,
+                        scheduler_stats.num_kv_fetch_completed_waiting,
+                    ),
+                ]:
+                    self.gauge_kv_fetch_by_stage[stage][engine_idx].set(num_reqs)
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
 
             self.counter_prefix_cache_queries[engine_idx].inc(

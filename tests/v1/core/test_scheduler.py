@@ -7002,3 +7002,39 @@ def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     # Deferring this step alone would ask for 6. The PP wait to 7 stands.
     assert "read" not in scheduler.schedule().num_scheduled_tokens
     assert read.next_decode_eligible_step == 7
+
+
+def test_kv_fetch_stages_for_confirmed_async_load():
+    """Without declared remote-prefill intent, a request is counted once the
+    connector confirms an async load; one that cannot get KV blocks yet is
+    waiting_to_start, and aborts clear both stages."""
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=32, is_async=True),
+        num_blocks=5,
+        block_size=16,
+    )
+    requests = create_requests(num_requests=2, num_tokens=48, block_size=16)
+    for request in requests:
+        scheduler.add_request(request)
+
+    def stages() -> tuple[int, int, int]:
+        stats = scheduler.make_stats()
+        assert stats is not None
+        return (
+            stats.num_kv_fetch_waiting_to_start,
+            stats.num_kv_fetch_in_progress,
+            stats.num_kv_fetch_completed_waiting,
+        )
+
+    assert stages() == (0, 0, 0)
+
+    # Only one load fits in the KV cache; the other waits to start.
+    scheduler.schedule()
+    assert requests[0].status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert requests[1].status == RequestStatus.WAITING
+    assert stages() == (1, 1, 0)
+
+    scheduler.finish_requests(
+        [request.request_id for request in requests], RequestStatus.FINISHED_ABORTED
+    )
+    assert stages() == (0, 0, 0)

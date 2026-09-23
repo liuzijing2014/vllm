@@ -28,6 +28,17 @@ def _num_waiting_requests(scheduler) -> int:
     return len(scheduler.waiting) + len(scheduler.skipped_waiting)
 
 
+def _kv_fetch_stages(scheduler) -> tuple[int, int, int]:
+    """(waiting_to_start, in_progress, completed_waiting) from SchedulerStats."""
+    stats = scheduler.make_stats()
+    assert stats is not None
+    return (
+        stats.num_kv_fetch_waiting_to_start,
+        stats.num_kv_fetch_in_progress,
+        stats.num_kv_fetch_completed_waiting,
+    )
+
+
 def test_basic_lifecycle():
     """Test lifecycle of a remote prefill."""
     vllm_config = create_vllm_config()
@@ -50,10 +61,12 @@ def test_basic_lifecycle():
 
     scheduler.add_request(request)
     request_id = request.request_id
+    assert _kv_fetch_stages(scheduler) == (1, 0, 0)
 
     # STEP (1):
     # (1a): schedule()
     scheduler_output = scheduler.schedule()
+    assert _kv_fetch_stages(scheduler) == (0, 1, 0)
 
     # Nothing running and empty scheduler output.
     assert len(scheduler.running) == 0
@@ -105,11 +118,13 @@ def test_basic_lifecycle():
     )
     assert _num_waiting_requests(scheduler) == 1
     assert request_id in scheduler.finished_recving_kv_req_ids
+    assert _kv_fetch_stages(scheduler) == (0, 0, 1)
 
     # STEP (3):
     # (3a): schedule(): this should actually schedule.
     scheduler_output = scheduler.schedule()
     assert len(scheduler.running) == 1
+    assert _kv_fetch_stages(scheduler) == (0, 0, 0)
 
     # Confirm the block are actually allocated.
     num_hashed_blocks = 0
@@ -430,6 +445,7 @@ def test_cannot_schedule_after_recv():
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
     assert _num_waiting_requests(scheduler) == 1
+    assert _kv_fetch_stages(scheduler) == (0, 1, 0)
 
     # Step 3: finish recving (5 blocks in use)
     scheduler_output = scheduler.schedule()
@@ -439,6 +455,7 @@ def test_cannot_schedule_after_recv():
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
     assert _num_waiting_requests(scheduler) == 1
+    assert _kv_fetch_stages(scheduler) == (0, 0, 1)
 
     # Step 4: try to schedule, remote request is put to running list
     # because the transfer is completed.
@@ -449,6 +466,7 @@ def test_cannot_schedule_after_recv():
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 2
     assert _num_waiting_requests(scheduler) == 0
+    assert _kv_fetch_stages(scheduler) == (0, 0, 0)
 
     # Step 5: Remote request will be put back to waiting list
     # because it needs new block to hold generated token.
@@ -457,6 +475,8 @@ def test_cannot_schedule_after_recv():
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
     assert _num_waiting_requests(scheduler) == 1
+    # A preempted request is no longer a KV fetch.
+    assert _kv_fetch_stages(scheduler) == (0, 0, 0)
 
     # Step 6: finish the request, free it.
     scheduler_output = scheduler.schedule()
@@ -538,6 +558,7 @@ def test_cannot_recv():
     assert _num_waiting_requests(scheduler) == 1
     # Should not have KV transfer in progress.
     assert request_remote.status != RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert _kv_fetch_stages(scheduler) == (1, 0, 0)
 
     # Step 3: finish the request, free it.
     scheduler_output = scheduler.schedule()
@@ -555,6 +576,7 @@ def test_cannot_recv():
     assert len(scheduler.running) == 0
     assert _num_waiting_requests(scheduler) == 1
     assert request_remote.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert _kv_fetch_stages(scheduler) == (0, 1, 0)
 
     # Step 5: finish recving (5 blocks in use)
     scheduler_output = scheduler.schedule()
@@ -564,6 +586,7 @@ def test_cannot_recv():
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 0
     assert _num_waiting_requests(scheduler) == 1
+    assert _kv_fetch_stages(scheduler) == (0, 0, 1)
 
     # Step 6: schedule remote request
     scheduler_output = scheduler.schedule()
@@ -571,6 +594,7 @@ def test_cannot_recv():
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
     assert _num_waiting_requests(scheduler) == 0
+    assert _kv_fetch_stages(scheduler) == (0, 0, 0)
 
     # Step 7: free everything.
     scheduler_output = scheduler.schedule()
@@ -578,6 +602,91 @@ def test_cannot_recv():
         reqs=[request_remote], use_eos=True
     )
     scheduler.update_from_output(scheduler_output, model_runner_output)
+    _ = scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
+def test_kv_fetch_stages_while_run_slots_full():
+    """With every run slot taken, a finished transfer stays completed_waiting
+    and a new remote prefill is counted before it reaches connector matching."""
+    vllm_config = create_vllm_config(max_num_seqs=1)
+    scheduler = create_scheduler(vllm_config)
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_TOKENS = int(BLOCK_SIZE * 2.5)
+
+    remote_a = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=NUM_TOKENS,
+        do_remote_prefill=True,
+    )
+    normal = create_request(request_id=2, block_size=BLOCK_SIZE, num_tokens=NUM_TOKENS)
+    remote_b = create_request(
+        request_id=3,
+        block_size=BLOCK_SIZE,
+        num_tokens=NUM_TOKENS,
+        do_remote_prefill=True,
+    )
+
+    # The async load of A does not take a run slot, so the normal request
+    # fills the only one in the same step.
+    scheduler.add_request(remote_a)
+    scheduler.add_request(normal)
+    scheduler_output = scheduler.schedule()
+    assert scheduler.running == [normal]
+    assert _kv_fetch_stages(scheduler) == (0, 1, 0)
+
+    # A finishes receiving, then B arrives while the slot is still taken.
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            reqs=[normal], finished_recving={remote_a.request_id}
+        ),
+    )
+    scheduler.add_request(remote_b)
+    scheduler_output = scheduler.schedule()
+    assert _kv_fetch_stages(scheduler) == (1, 0, 1)
+
+    # Once the normal request finishes, A runs and B keeps waiting.
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output(reqs=[normal], use_eos=True)
+    )
+    scheduler_output = scheduler.schedule()
+    assert scheduler.running == [remote_a]
+    assert _kv_fetch_stages(scheduler) == (1, 0, 0)
+
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output(reqs=[remote_a], use_eos=True)
+    )
+    scheduler.finish_requests(remote_b.request_id, RequestStatus.FINISHED_ABORTED)
+    _ = scheduler.schedule()
+    assert _kv_fetch_stages(scheduler) == (0, 0, 0)
+    assert_scheduler_empty(scheduler)
+
+
+def test_kv_fetch_stages_cleared_on_abort():
+    """Aborting a request during its KV transfer clears its fetch stage."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    request = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=int(BLOCK_SIZE * 2.5),
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    assert _kv_fetch_stages(scheduler) == (0, 1, 0)
+
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert _kv_fetch_stages(scheduler) == (0, 0, 0)
+
+    # Blocks are freed once the in-flight transfer reports completion.
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(reqs=[], finished_recving={request.request_id}),
+    )
     _ = scheduler.schedule()
     assert_scheduler_empty(scheduler)
 

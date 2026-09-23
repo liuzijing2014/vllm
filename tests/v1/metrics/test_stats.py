@@ -1,7 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import patch
+
+import pytest
+from prometheus_client import REGISTRY
+
+from vllm.config import KVTransferConfig, ModelConfig, VllmConfig
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.metrics.loggers import AggregatedLoggingStatLogger, PrometheusStatLogger
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
@@ -288,3 +296,79 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+KV_FETCH_TEST_MODEL = "facebook/opt-125m"
+
+
+def _kv_fetch_vllm_config(kv_connector: str | None) -> VllmConfig:
+    return VllmConfig(
+        model_config=ModelConfig(model=KV_FETCH_TEST_MODEL),
+        kv_transfer_config=(
+            KVTransferConfig(kv_connector=kv_connector, kv_role="kv_consumer")
+            if kv_connector
+            else None
+        ),
+    )
+
+
+@pytest.mark.cpu_test
+def test_prometheus_kv_fetch_stage_gauges():
+    def sample(engine: str, stage: str) -> float | None:
+        return REGISTRY.get_sample_value(
+            "vllm:num_requests_kv_fetch_by_stage",
+            {"model_name": KV_FETCH_TEST_MODEL, "engine": engine, "stage": stage},
+        )
+
+    try:
+        # Not registered without a KV connector.
+        PrometheusStatLogger(_kv_fetch_vllm_config(None))
+        assert sample("0", "in_progress") is None
+
+        stat_logger = PrometheusStatLogger(
+            _kv_fetch_vllm_config("NixlConnector"), engine_indexes=[0, 1]
+        )
+        stat_logger.record(
+            SchedulerStats(
+                num_kv_fetch_waiting_to_start=3,
+                num_kv_fetch_in_progress=2,
+                num_kv_fetch_completed_waiting=1,
+            ),
+            iteration_stats=None,
+            engine_idx=1,
+        )
+        assert sample("1", "waiting_to_start") == 3
+        assert sample("1", "in_progress") == 2
+        assert sample("1", "completed_waiting") == 1
+        assert sample("0", "in_progress") == 0
+    finally:
+        unregister_vllm_metrics()
+
+
+@pytest.mark.cpu_test
+def test_aggregated_log_sums_kv_fetch_stages():
+    stat_logger = AggregatedLoggingStatLogger(
+        _kv_fetch_vllm_config("NixlConnector"), engine_indexes=[0, 1]
+    )
+    stat_logger.record(
+        SchedulerStats(num_kv_fetch_waiting_to_start=3, num_kv_fetch_in_progress=2),
+        iteration_stats=None,
+        engine_idx=0,
+    )
+    stat_logger.record(
+        SchedulerStats(
+            num_kv_fetch_waiting_to_start=1, num_kv_fetch_completed_waiting=4
+        ),
+        iteration_stats=None,
+        engine_idx=1,
+    )
+
+    with patch("vllm.v1.metrics.loggers.logger") as mock_logger:
+        stat_logger.log()
+
+    calls = mock_logger.info.call_args_list + mock_logger.debug.call_args_list
+    messages = [call.args[0] % call.args[1:] for call in calls]
+    assert any(
+        "KV fetch: 4 waiting to start, 2 in progress, 4 completed waiting" in message
+        for message in messages
+    )

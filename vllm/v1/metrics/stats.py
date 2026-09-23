@@ -191,6 +191,11 @@ class SchedulerStats:
     num_waiting_reqs: int = 0  # length of the "waiting" request queue
     num_skipped_waiting_reqs: int = 0  # length of the "skipped waiting" queue
 
+    # Async KV load stages; mutually exclusive subsets of the waiting requests.
+    num_kv_fetch_waiting_to_start: int = 0
+    num_kv_fetch_in_progress: int = 0
+    num_kv_fetch_completed_waiting: int = 0
+
     # These are used for internal DP load-balancing.
     step_counter: int = 0
     current_wave: int = 0

@@ -10,7 +10,12 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import create_vllm_config
+from tests.v1.kv_connector.unit.utils import (
+    create_model_runner_output,
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+)
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
@@ -533,6 +538,57 @@ def test_multi_connector_handle_preemptions_integration():
     finally:
         # Cleanup
         shutil.rmtree(storage_path, ignore_errors=True)
+
+
+def test_kv_fetch_stages_for_multi_connector_async_load():
+    """On a prefill instance, an async load served by a MultiConnector child
+    goes through the KV fetch stages like any other async load."""
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "NixlConnector", "kv_role": "kv_producer"},
+                {
+                    "kv_connector": "MockKVConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "matched_tokens": 32,
+                        "is_async": True,
+                    },
+                    "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                },
+            ]
+        },
+    )
+    scheduler = create_scheduler(vllm_config)
+
+    def stages() -> tuple[int, int, int]:
+        stats = scheduler.make_stats()
+        assert stats is not None
+        return (
+            stats.num_kv_fetch_waiting_to_start,
+            stats.num_kv_fetch_in_progress,
+            stats.num_kv_fetch_completed_waiting,
+        )
+
+    # A prefill request is only counted once a connector confirms a load.
+    request = create_request(request_id=1, num_tokens=48, do_remote_decode=True)
+    scheduler.add_request(request)
+    assert stages() == (0, 0, 0)
+
+    scheduler_output = scheduler.schedule()
+    assert stages() == (0, 1, 0)
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(reqs=[], finished_recving={request.request_id}),
+    )
+    assert stages() == (0, 0, 1)
+
+    scheduler.schedule()
+    assert scheduler.running == [request]
+    assert stages() == (0, 0, 0)
 
 
 class TestMultiConnectorStats:
