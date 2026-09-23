@@ -1615,6 +1615,77 @@ def test_reqs_to_send_deadline_rebased_to_worker_clock(default_vllm_config, dist
     assert req_id in worker._reqs_to_process
 
 
+def _worker_for_expiry_sweep(vllm_config):
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    return connector, connector.connector_worker
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_expiry_sweep_reclaims_lease_behind_a_renewed_one(
+    default_vllm_config, dist_init
+):
+    """A heartbeat renews a lease in place, keeping its position in
+    _reqs_to_send. An expired lease behind it must still be released.
+    """
+    vllm_config = create_vllm_config()
+    _, worker = _worker_for_expiry_sweep(vllm_config)
+
+    now = time.perf_counter()
+    worker._reqs_to_send = {"renewed": now - 1.0, "long-lease": now + 45.0}
+    worker._reqs_to_process.update(("renewed", "long-lease", "expired"))
+    worker._handle_heartbeat("renewed")
+    worker._reqs_to_send["expired"] = now - 0.5
+
+    done_sending, _ = worker.get_finished()
+
+    assert done_sending == {"expired"}
+    assert set(worker._reqs_to_send) == {"renewed", "long-lease"}
+    assert "expired" not in worker._reqs_to_process
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_expiry_sweep_reclaims_short_lease_behind_a_longer_ttl(
+    default_vllm_config, dist_init
+):
+    """With bidirectional KV transfer, decoder_kv_blocks_ttl and
+    kv_lease_duration deadlines share _reqs_to_send, so a short lease can
+    follow a longer one.
+    """
+    vllm_config = create_vllm_config()
+    connector, worker = _worker_for_expiry_sweep(vllm_config)
+
+    long_req, short_req = "req-long-ttl", "req-short-ttl"
+    scheduler_clock = time.perf_counter()
+    metadata = NixlConnectorMetadata()
+    metadata.reqs_in_batch = {long_req, short_req}
+    metadata.reqs_to_send = {
+        long_req: scheduler_clock + 480.0,
+        short_req: scheduler_clock - 30.0,
+    }
+    metadata.scheduler_clock = scheduler_clock
+    connector.bind_connector_metadata(metadata)
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
+    assert list(worker._reqs_to_send) == [long_req, short_req]
+
+    done_sending, _ = worker.get_finished()
+
+    assert done_sending == {short_req}
+    assert long_req in worker._reqs_to_send
+
+
 def test_kv_connector_stats_aggregation():
     """Test KV transfer stats aggregation across TP ranks using
     KVOutputAggregator (used by MultiprocExecutor).
